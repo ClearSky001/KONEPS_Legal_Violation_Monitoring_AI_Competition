@@ -1,0 +1,5 @@
+# 법령 RAG(bge-m3, 환경변수 PPS_EMBED_DIR)용 추가 패키지.
+# vllm·torch·transformers·xgrammar 는 평가 서버 고정 패키지이므로 여기에 적지 않습니다.
+# 미설치/로드 실패 시 script.py 는 RAG 를 생략하고 규칙+LLM 경로로 그대로 동작합니다.
+sentence-transformers
+numpy

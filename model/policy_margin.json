@@ -1,0 +1,27 @@
+{
+ "_meta": {
+  "src": "policy_lab.py margin-grid=0,1,2,3,4,6,8,10 min-gain=0.005",
+  "benches": "dev200(공식정답) + sl_a_992(자가라벨)",
+  "dev_macro": "0.8844→0.8869 (+0.0025)",
+  "sl_macro": "0.7585→0.7608 (+0.0023)",
+  "date": "2026-09-24",
+  "logprob_note": "margin 임계 미채택: 모델 확신도가 전반적으로 높아(median>15) 연속 임계로는 분별 불가"
+ },
+ "policy": {
+  "v1": {
+   "recover": "high"
+  },
+  "v8": {
+   "recover": "mid"
+  },
+  "v17": {
+   "suppress": "mid"
+  },
+  "v19": {
+   "suppress": "mid"
+  },
+  "v20": {
+   "recover": "mid"
+  }
+ }
+}
