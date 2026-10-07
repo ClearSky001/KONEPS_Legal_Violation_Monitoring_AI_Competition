@@ -1,0 +1,1 @@
+# KONEPS_Legal_Violation_Monitoring_AI_Competition
