@@ -1,5 +1,140 @@
 # KONEPS Legal Violation Monitoring AI Competition – LLM Fact Extraction + Rule Engine + Legal RAG
 
+**English** | [한국어](#한국어)
+
+## Project Overview & Key Results
+This repository shares the code of an inference pipeline I built for the [AI Competition for Monitoring Legal Violations in KONEPS Self-Procurement Bid Announcements](https://dacon.io/competitions/official/236754/overview/description) (나라장터 자체입찰 공고 법령 위반사항 모니터링 AI 경진대회). For each bid announcement, it outputs **whether each of 24 review items violates the law (0/1) and the supporting evidence text**.
+
+- `script.py` is the submission code that runs automatically on the evaluation server. **Instead of asking the LLM directly whether there is a violation, it has the LLM extract only facts** from the announcement, and a **Python rule engine** decides on statutory amount thresholds, exceptions, and absence detection.
+- The **legal RAG** splits the law package **into article-level chunks** and embeds them with bge-m3 to find the relevant articles for each item. These articles go into the **second-pass judgment** prompt, which runs only when the rules alone are not conclusive.
+- `model/policy_margin.json` is a policy file that defines, per item, how second-pass results are combined with the rule results (suppress/restore). Only items validated on both the 200 dev samples and self-labeled data were kept.
+
+### Final Results
+Raised the leaderboard score (Macro F1) from **0.33 → 0.668**, ranking **195th out of 1,177 participants (top 17%)**.
+
+<p align="center">
+  <img src="assets/leaderboard_score_en.png" width="380" alt="Leaderboard score change"/>
+</p>
+
+---
+
+## Task Overview
+- **Topic**: Judging legal violations in KONEPS self-procurement bid announcements and presenting the evidence (Hosts: Ministry of the Interior and Safety · National Information Society Agency / Organizer: Public Procurement Service / Operator: DACON)
+- **Input**: One bid announcement — the text of the announcement and its attachments (specifications, statements of work, requests for proposal, etc.) plus its KONEPS registration info (21 metadata fields)
+- **Output**: `submission.csv` with 49 columns — `id`, violation flags `v1`–`v24` (0/1), and evidence text `e1`–`e24` (substrings of the source text)
+- **Evaluation**: Macro F1 (simple average of the violation-class F1 over the 24 items), 1,853 evaluation samples
+- **Constraints**
+  - Only the fixed LLM `google/gemma-4-26B-A4B-it` and the auxiliary embedding model `BAAI/bge-m3` may be used (no fine-tuning or weight submission)
+  - No labeled training data (20,000 unlabeled announcements + 200 labeled dev examples; self-labeling allowed)
+  - Code submission: inference must finish within 2 hours on the evaluation server, with no internet access
+
+---
+
+## Repository Structure
+```
+KONEPS_Legal_Violation_Monitoring_AI_Competition/
+├── script.py              # Submission code (preprocessing · fact extraction · rule engine · legal RAG · second-pass judgment · evidence alignment)
+├── requirements.txt       # Extra packages for the legal RAG (sentence-transformers, numpy)
+├── model/
+│   └── policy_margin.json # Second-pass combination policy (per-item suppress/restore criteria)
+├── assets/                # Diagrams for the README
+├── .gitignore / LICENSE
+└── README.md
+```
+
+---
+
+## Tech Stack
+- **Language**: Python 3.12
+- **LLM inference**: vLLM offline API, JSON Schema-based structured outputs, int8 quantized loading
+- **Retrieval**: sentence-transformers (`BAAI/bge-m3`), numpy cosine similarity
+- **Rule engine · preprocessing**: Regular expressions, standard library (`re`, `json`, `csv`, `unicodedata`, etc.)
+
+---
+
+## Dataset
+The competition data (20,000 unlabeled announcements, 200 dev samples with labels, the item table, the law package, the baseline, etc.) cannot be redistributed under the competition rules, so it is **not included in this repository.** Download it from the Data tab of the [competition page](https://dacon.io/competitions/official/236754/overview/description).
+
+> **Note:** This repository is maintained **for sharing code**. `script.py` follows the input/output conventions of the competition baseline (data loader, CSV format validation, etc.). To run it, prepare the competition data and the fixed models locally.
+
+---
+
+## Pipeline Architecture and Flow
+
+<p align="center">
+  <img src="assets/pipeline_en.png" alt="Architecture and flow of the legal-RAG-based violation judgment system"/>
+</p>
+
+1. **Preprocessing · section extraction**
+   - From the metadata, computes the estimated price range, the applicable contract law (national/local), the contract and award method, and whether the item is a product reserved for competition among SMEs.
+   - From the announcement, extracts only the sentences about eligibility, the announcement summary, joint contracting, briefing sessions, required documents, and specifications, to shorten the prompt.
+2. **LLM fact extraction (one call per announcement)**
+   - Gemma uses JSON Schema structured output to extract facts (whether a track record is required and its amount, the unit of regional restriction, company-size restrictions, whether direct production confirmation is required, etc.) along with supporting quotes.
+   - The quotes are instructed to be copied verbatim from the source text, and regex-based facts are prepared as well in case extraction fails.
+3. **Rule engine (first-pass judgment)**
+   - Applies statutory criteria to the extracted facts to decide `v1`–`v24`. Examples: the notified amount threshold (KRW 230 million), the cap for regional restrictions under local contract law (KRW 500 million), the KRW 100 million boundary, the minimum joint-contracting share (national 10% / local 5%), and the briefing period for negotiated contracts (40 / 20 / 10 days).
+   - Absence-detection items (Nos. 10, 11, 16, 18, and 20), where "a required statement is missing" is the violation, and the exceptions for small-amount and other private (sole-source) contracts are also handled by rules.
+4. **Legal RAG**
+   - Chunks the law package by article, chapter, section, and appendix table; maps the article citations in the item table directly to those articles, then supplements them with bge-m3 semantic search.
+   - Retrieval is not run per announcement; it is computed only once per item × legal system (national/local) to save run time.
+5. **Second-pass judgment**
+   - Re-asks only the (announcement, item) pairs that have a policy, among items the rules judged as violations (suppression check) and items with only weak clues (restore candidates).
+   - The prompt consists of each item's criteria and exceptions, the related articles, and excerpts from the announcement, and Gemma returns `{violation, confidence, evidence quote}`.
+6. **Policy combination · evidence alignment**
+   - Only judgments that exceed the per-item threshold in `policy_margin.json` overturn the rule result (suppress/restore). A restore is applied only when the quote actually exists in the source text.
+   - Evidence text is restored as a substring of the source text and cut to 500 characters; it is left blank for absence-detection items.
+
+**Safeguards**: A rule-based provisional answer is saved before the model is loaded, and run time is tracked so that when the time limit gets close, the remaining announcements are finalized with the rule results. A submission file remains even if any stage fails.
+
+---
+
+## Validation Approach and Lessons Learned
+- **Separating LLM extraction from rule application**: I cached the facts extracted in the GPU environment (`--dump-facts`), and when only the rules changed, replayed the cache (`--facts`) to evaluate without a GPU.
+- **Keeping only validated policies**: After second-pass policies added by looking only at the 200 dev samples lowered the leaderboard score (0.6596 → 0.6511), I set a rule to keep only the items whose effect was confirmed on both the 200 dev samples and the self-labeled data.
+- **Distribution gap between dev and evaluation data**: The 200 dev samples were built so that each item's violation cases are evenly represented, so they do not represent the distribution of the evaluation data. As a result, the dev Macro F1 (0.887) and the leaderboard score (0.668) differed greatly, and for rare items a single false positive cut F1 sharply. I built an auxiliary metric that estimates the evaluation distribution from each item's firing rate on the unlabeled data, and used it to decide whether to adopt a change.
+
+---
+
+## Usage
+1. **Environment setup**
+   ```bash
+   pip install -r requirements.txt   # vllm · torch · transformers are fixed packages on the evaluation server
+   ```
+2. **Prepare the data and models**
+   - Prepare the `data/` folder from the competition Data tab (item table, law package, etc.) and the input JSONL.
+   - Set the paths with the environment variables `PPS_DATA_DIR`, `PPS_OUTPUT_DIR`, `PPS_MODEL_DIR`, and `PPS_EMBED_DIR`.
+3. **Check the flow (without models)**
+   ```bash
+   python script.py --mock --input dev.jsonl --data-dir ./data
+   ```
+4. **Run the rule engine only**
+   ```bash
+   python script.py --no-llm --input dev.jsonl --data-dir ./data
+   ```
+5. **Full inference**
+   ```bash
+   python script.py --data-dir ./data --output-dir ./output
+   ```
+   The results are saved to `output/submission.csv`, and after saving, the script checks the column count, row count, ids, value ranges, and evidence text length. Use `--no-judge` to turn off the second-pass judgment.
+
+---
+
+## Reproducibility Check
+- **Possible**: With the competition data prepared, you can check the flow and the rule engine without a GPU using the `--mock` and `--no-llm` modes. Full inference needs a GPU that can load the fixed LLM (NVIDIA L40S on the evaluation server).
+- **Not possible**: It cannot run without the data. (The repository is for sharing code.)
+
+---
+
+## Key Results
+- **Leaderboard Macro F1**: `0.668` (1,853 evaluation samples)
+- **Rank**: 195th out of 1,177 (top 17%)
+- **Local validation**: Macro F1 `0.887` on the 200 dev samples
+- **Implementation**: LLM fact extraction + rule engine + legal-RAG-based second-pass judgment / evidence text is always a substring of the source text / safeguards for the time limit
+
+---
+
+# 한국어
+
 ## 프로젝트 소개 & 주요 성과
 [나라장터 자체입찰 공고 법령 위반사항 모니터링 AI 경진대회](https://dacon.io/competitions/official/236754/overview/description) (AI Competition for Monitoring Legal Violations in KONEPS Self-Procurement Bid Announcements)에 참가하여, 입찰공고 1건에서 **24개 검토 항목의 법령 위반 여부(0/1)와 근거 문구**를 출력하는 추론 파이프라인을 개발한 코드를 공유합니다.
 
